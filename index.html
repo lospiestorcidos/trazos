@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Dibujar trazos</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<!-- Para añadirla a la pantalla de inicio del iPad como app a pantalla completa -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Trazos">
+<meta name="theme-color" content="#ffffff">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icono-180.png">
+<link rel="icon" href="icono-192.png">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<style>
+  :root { --barra: #fff; --tinta: #111; --acento: #0a7cff; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #d9d9d9;
+    position: fixed; width: 100%;
+    touch-action: none; -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+    font-family: -apple-system, system-ui, sans-serif; }
+  canvas { display: block; touch-action: none; }
+
+  /* Barra de botones grandes y táctiles */
+  #barra { position: fixed; top: 0; left: 0; right: 0; z-index: 5; display: flex; gap: 8px;
+    flex-wrap: wrap; align-items: center; padding: 8px max(10px, env(safe-area-inset-right)) 8px max(10px, env(safe-area-inset-left));
+    padding-top: max(8px, env(safe-area-inset-top));
+    background: var(--barra); border-bottom: 1px solid #bbb;
+    transition: opacity .2s; }
+  #barra.dibujando { opacity: .15; pointer-events: none; }   /* no estorba mientras dibujas */
+  #barra button, #barra label.boton { flex: none; min-width: 48px; height: 48px; padding: 0 14px;
+    font-size: 17px; border: 1px solid #999; border-radius: 10px; background: #f4f4f4; color: var(--tinta);
+    display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+  #barra button:active, #barra label.boton:active { background: #ddd; }
+  #barra button:disabled { opacity: .35; }
+  #barra button.activo { background: var(--acento); border-color: var(--acento); color: #fff; }
+  #barra .sep { flex: none; width: 1px; height: 32px; background: #ccc; }
+  #barra .grosor { flex: none; display: flex; align-items: center; gap: 8px; font-size: 14px; }
+  #barra input[type=range] { width: 130px; height: 48px; }
+  #estado { flex: none; font-size: 13px; color: #666; min-width: 70px; }
+  #aviso { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 6;
+    background: rgba(0,0,0,.8); color: #fff; padding: 10px 16px; border-radius: 10px; font-size: 15px;
+    opacity: 0; transition: opacity .25s; pointer-events: none; }
+  #aviso.visible { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="barra">
+  <button id="bDeshacer" title="Deshacer">↶ Deshacer</button>
+  <button id="bRehacer" title="Rehacer">↷</button>
+  <button id="bBorrar" title="Borrar todo (se puede deshacer)">Borrar todo</button>
+  <span class="sep"></span>
+  <span class="grosor">Grosor <input id="rGrosor" type="range" min="4" max="80" value="14"></span>
+  <span class="sep"></span>
+  <button id="bZoomMenos" title="Alejar">－</button>
+  <button id="bZoomMas" title="Acercar">＋</button>
+  <button id="bEncajar" title="Ver la hoja entera">Ver todo</button>
+  <button id="bMover" title="Mover la hoja con un dedo (no dibuja mientras está activo)">✋ Mover</button>
+  <span class="sep"></span>
+  <button id="bSVG" title="Descargar SVG">SVG</button>
+  <button id="bJSON" title="Descargar JSON">JSON</button>
+  <button id="bCompartir" title="Compartir (AirDrop, Mensajes…)">Compartir</button>
+  <label class="boton" title="Cargar un JSON guardado">Abrir<input id="fArchivo" type="file" accept=".json,application/json" hidden></label>
+  <button id="bPantalla" title="Pantalla completa" hidden>⛶</button>
+  <span id="estado"></span>
+</div>
+<div id="aviso"></div>
+
+<script src="p5.min.js"></script>   <!-- copia local: funciona sin Internet -->
+<script>
+/* ==========================================================================
+   Dibujar trazos — mini aplicación de dibujo para iPad (Apple Pencil), móvil y ratón.
+
+   FORMATO DE SALIDA
+   - SVG: cada trazo es un <path> sin relleno, en una hoja de 3508 × 2481 (A4 apaisado).
+     Es justo lo que cargan tus bocetos (comun/svg-puntos.js muestrea cada path), así que
+     el archivo se abre directamente en trazo-midi, trazo-cuerpo, etc. con "Cargar otro SVG".
+   - JSON: para seguir dibujando después. Coordenadas normalizadas 0..1 sobre la hoja:
+       { formato:"trazos-v1", hoja:{ancho,alto},
+         trazos:[ { grosor, puntos:[[x, y, ms, presión], ...] } ] }
+   ========================================================================== */
+
+/* ───────── Ajustes ───────── */
+const HOJA_W = 3508, HOJA_H = 2481;     // tamaño de la hoja (unidades del SVG)
+const SUAVIZADO = 0.5;                  // 0 = sin suavizar, 0.9 = muy suavizado (con retraso)
+const DIST_MIN = 1.5;                   // px: no guardar puntos más juntos que esto
+const CLAVE = 'dibujar-trazos-v1';      // localStorage
+
+/* ───────── Estado ───────── */
+let trazos = [];          // trazos terminados: { grosor, puntos:[[x,y,ms,p],...] } (x,y en 0..1)
+let deshacer = [], rehacer = [];        // historial: copias de la lista de trazos
+let actual = null;        // trazo que se está dibujando
+let idPuntero = null;     // puntero que dibuja (se ignoran los demás: sin dos dedos ni palma)
+let hayLapiz = false;     // si se ha visto un Apple Pencil, el dedo deja de dibujar (palma)
+let grosor = 14;          // en unidades de la hoja
+let esc = 1, ox = 0, oy = 0;            // hoja en pantalla: escala y esquina superior izquierda
+// Vista (zoom y desplazamiento): z = aumento (1 = hoja entera); (cx, cy) = punto de la hoja (0..1) que queda en el centro
+const vista = { z: 1, cx: 0.5, cy: 0.5 };
+const ZOOM_MAX = 24;
+let escBase = 1;          // escala con la hoja entera a la vista
+let capaVista = null;     // vista con la que se pintó `capa` (para estirarla mientras haces zoom)
+let modoMover = false;    // botón ✋: un dedo (o el ratón) mueve la hoja en vez de dibujar
+const punteros = new Map();   // dedos/ratón apoyados: id → {x, y} (el Pencil no cuenta, salvo en modo mover)
+let gesto = null;         // gesto de zoom/desplazamiento en curso: { cx, cy, d } (centro y distancia anteriores)
+let capa;                 // trazos terminados ya pintados (para no repintarlos en cada movimiento)
+let t0 = 0, ultimo = null;
+
+const $ = (id) => document.getElementById(id);
+
+/* ───────── p5 ───────── */
+function setup() {
+  pixelDensity(Math.min(window.devicePixelRatio || 1, 2));
+  const c = createCanvas(windowWidth, windowHeight);
+  noLoop();                                         // solo se repinta cuando hace falta
+  const el = c.elt;
+  el.addEventListener('pointerdown', alBajar);
+  el.addEventListener('pointermove', alMover);
+  el.addEventListener('pointerup', alSubir);
+  el.addEventListener('pointercancel', alSubir);
+  el.addEventListener('contextmenu', (e) => e.preventDefault());
+  el.addEventListener('wheel', alRueda, { passive: false });
+  // iOS: sin zoom por pellizco ni scroll
+  ['gesturestart', 'gesturechange', 'gestureend'].forEach((n) => document.addEventListener(n, (e) => e.preventDefault()));
+  document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+
+  cargarLocal();
+  colocarHoja();
+  reconstruir();
+  actualizarBotones();
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  colocarHoja();
+  reconstruir();
+}
+
+/** Calcula dónde cae la hoja en pantalla (debajo de la barra, centrada y ajustada). */
+function colocarHoja() {
+  const barra = $('barra').offsetHeight;
+  const margen = 8;
+  const libreW = windowWidth - 2 * margen, libreH = windowHeight - barra - 2 * margen;
+  escBase = Math.min(libreW / HOJA_W, libreH / HOJA_H);   // escala con la hoja entera a la vista
+  fijarVista(vista.z, vista.cx, vista.cy);
+}
+
+/** Zona de pantalla donde se ve la hoja (debajo de la barra) y su centro. */
+function zonaVista() {
+  const barra = $('barra').offsetHeight;
+  return { x: windowWidth / 2, y: barra + (windowHeight - barra) / 2 };
+}
+
+/** Fija zoom y centro de la vista (con límites) y recalcula escala y posición de la hoja. */
+function fijarVista(z, cx, cy) {
+  vista.z = Math.min(ZOOM_MAX, Math.max(1, z));
+  vista.cx = Math.min(1, Math.max(0, cx));          // el centro no sale de la hoja: no te pierdes
+  vista.cy = Math.min(1, Math.max(0, cy));
+  esc = escBase * vista.z;
+  const c = zonaVista();
+  ox = c.x - vista.cx * HOJA_W * esc;
+  oy = c.y - vista.cy * HOJA_H * esc;
+  actualizarBotones();
+}
+
+/** Zoom de factor `f` manteniendo fijo el punto de pantalla (px, py): lo que tocas no se mueve. */
+function zoomEn(f, px, py, mover) {
+  const sx = (px - ox) / (HOJA_W * esc), sy = (py - oy) / (HOJA_H * esc);   // punto de la hoja bajo (px,py)
+  const z = Math.min(ZOOM_MAX, Math.max(1, vista.z * f));
+  const e2 = escBase * z, c = zonaVista();
+  const qx = px + (mover ? mover.x : 0), qy = py + (mover ? mover.y : 0);  // dónde debe quedar ese punto
+  fijarVista(z, (c.x - (qx - sx * HOJA_W * e2)) / (HOJA_W * e2), (c.y - (qy - sy * HOJA_H * e2)) / (HOJA_H * e2));
+}
+
+/** Repinta todos los trazos terminados en la capa y refresca la pantalla. */
+function reconstruir() {
+  if (capa) capa.remove();
+  capa = createGraphics(width, height);
+  capa.pixelDensity(pixelDensity());
+  capa.clear();
+  trazos.forEach((t) => pintarTrazo(capa, t, 1));
+  capaVista = { esc: esc, ox: ox, oy: oy };
+  redraw();
+}
+
+function draw() {
+  background(217);
+  noStroke(); fill(255);
+  rect(ox, oy, HOJA_W * esc, HOJA_H * esc);          // la hoja
+  // Mientras haces zoom o mueves, la capa ya pintada se estira (rápido); al soltar se repinta nítida
+  push();
+  translate(ox, oy); scale(esc / capaVista.esc); translate(-capaVista.ox, -capaVista.oy);
+  image(capa, 0, 0, width, height);
+  pop();
+  if (actual) pintarTrazo(window, actual, 1);
+}
+
+/** Dibuja un trazo en `g` (el lienzo o la capa). Con presión, el grosor varía tramo a tramo. */
+function pintarTrazo(g, t, desde) {
+  const p = t.puntos;
+  g.stroke(0); g.noFill(); g.strokeCap(ROUND); g.strokeJoin(ROUND);
+  if (p.length === 1) {                              // un toque = un punto
+    g.strokeWeight(Math.max(1, t.grosor * esc * factor(p[0][3])));
+    g.point(ox + p[0][0] * HOJA_W * esc, oy + p[0][1] * HOJA_H * esc);
+    return;
+  }
+  for (let i = Math.max(1, desde); i < p.length; i++) {
+    g.strokeWeight(Math.max(1, t.grosor * esc * factor((p[i - 1][3] + p[i][3]) / 2)));
+    g.line(ox + p[i - 1][0] * HOJA_W * esc, oy + p[i - 1][1] * HOJA_H * esc,
+           ox + p[i][0] * HOJA_W * esc, oy + p[i][1] * HOJA_H * esc);
+  }
+}
+
+/** Presión (0..1) → factor de grosor. Presión 0,5 (dedo, ratón) = grosor normal. */
+function factor(pr) { return 0.35 + 1.3 * pr; }
+
+/* ───────── Dibujo con puntero (dedo, Pencil, ratón) ───────── */
+/* Reglas:
+   - Pencil o ratón: dibuja.  Un dedo: dibuja (salvo que se haya usado el Pencil: entonces es la palma).
+   - Dos dedos: zoom (pellizco) y mover la hoja. Si había un trazo empezado con el primer dedo, se descarta.
+   - Botón ✋ Mover: un dedo o el ratón mueven la hoja y no dibujan. */
+function alBajar(e) {
+  if (e.pointerType === 'pen') hayLapiz = true;
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  e.preventDefault();
+  mantenerPantallaEncendida();
+  try { e.target.setPointerCapture(e.pointerId); } catch (x) { /* nada */ }
+
+  const cuentaParaGesto = e.pointerType !== 'pen' || modoMover;
+  if (cuentaParaGesto) punteros.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if (cuentaParaGesto && (modoMover || punteros.size >= 2)) {
+    descartarTrazoActual();                          // el primer dedo no era para dibujar
+    iniciarGesto();
+    return;
+  }
+  if (idPuntero !== null || gesto) return;           // ya hay un puntero dibujando
+  if (e.pointerType === 'touch' && hayLapiz) return; // con Pencil, el dedo/palma no dibuja
+  idPuntero = e.pointerId;
+  $('barra').classList.add('dibujando');
+  t0 = performance.now();
+  actual = { grosor: grosor, puntos: [] };
+  ultimo = null;
+  anadir(e, true);
+  redraw();
+}
+
+function alMover(e) {
+  if (punteros.has(e.pointerId)) {
+    e.preventDefault();
+    punteros.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (gesto) { hacerGesto(); return; }
+  }
+  if (e.pointerId !== idPuntero || !actual) return;
+  e.preventDefault();
+  const lista = e.getCoalescedEvents ? e.getCoalescedEvents() : [];   // todos los puntos intermedios del Pencil
+  (lista.length ? lista : [e]).forEach((ev) => anadir(ev, false));
+  redraw();
+}
+
+function alSubir(e) {
+  const eraGesto = !!gesto && punteros.has(e.pointerId);
+  punteros.delete(e.pointerId);
+  if (eraGesto) {
+    e.preventDefault();
+    if (punteros.size >= (modoMover ? 1 : 2)) iniciarGesto();   // queda un gesto válido: se reajusta sin saltos
+    else { gesto = null; reconstruir(); }                       // fin del gesto: repinta nítido
+    return;
+  }
+  if (e.pointerId !== idPuntero) return;
+  e.preventDefault();
+  if (actual) {
+    anadir(e, false, true);                          // el último punto, sin suavizar: el trazo acaba donde levantas
+    guardarHistorial();
+    trazos.push(actual);
+    pintarTrazo(capa, actual, 1);
+    actual = null;
+    guardarLocal();
+  }
+  idPuntero = null; ultimo = null;
+  $('barra').classList.remove('dibujando');
+  actualizarBotones();
+  redraw();
+}
+
+function descartarTrazoActual() {
+  actual = null; idPuntero = null; ultimo = null;
+  $('barra').classList.remove('dibujando');
+}
+
+/* ───────── Zoom y desplazamiento ───────── */
+/** Centro y separación de los dedos apoyados (con uno solo, la separación es 0). */
+function medidas() {
+  const p = [...punteros.values()];
+  const cx = p.reduce((s, q) => s + q.x, 0) / p.length, cy = p.reduce((s, q) => s + q.y, 0) / p.length;
+  const d = p.length >= 2 ? Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y) : 0;
+  return { cx: cx, cy: cy, d: d };
+}
+function iniciarGesto() { gesto = medidas(); }
+function hacerGesto() {
+  const m = medidas();
+  const f = (gesto.d > 10 && m.d > 10) ? m.d / gesto.d : 1;          // pellizco → zoom
+  zoomEn(f, gesto.cx, gesto.cy, { x: m.cx - gesto.cx, y: m.cy - gesto.cy });   // y arrastre → desplazar
+  gesto = m;
+  redraw();
+}
+
+/** Zoom con los botones: alrededor del centro de la vista. */
+function zoomBoton(f) {
+  const c = zonaVista();
+  zoomEn(f, c.x, c.y);
+  reconstruir();
+}
+function encajar() { fijarVista(1, 0.5, 0.5); reconstruir(); }
+
+/* Ratón / trackpad del Mac: rueda = desplazar; Ctrl + rueda o pellizco del trackpad = zoom */
+function alRueda(e) {
+  e.preventDefault();
+  if (e.ctrlKey || e.metaKey) zoomEn(Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
+  else zoomEn(1, e.clientX, e.clientY, { x: -e.deltaX, y: -e.deltaY });
+  clearTimeout(alRueda.t); alRueda.t = setTimeout(reconstruir, 120);
+  redraw();
+}
+
+/** Añade un punto al trazo actual (suavizado ligero y distancia mínima). */
+function anadir(ev, primero, final) {
+  let x = ev.clientX, y = ev.clientY;
+  const presion = (ev.pointerType === 'pen' && ev.pressure > 0) ? ev.pressure : 0.5;
+  if (!primero && ultimo && !final) {                // media móvil exponencial: quita el temblor
+    x = ultimo.x + (x - ultimo.x) * (1 - SUAVIZADO);
+    y = ultimo.y + (y - ultimo.y) * (1 - SUAVIZADO);
+  }
+  if (ultimo && Math.hypot(x - ultimo.x, y - ultimo.y) < DIST_MIN && !final) return;
+  if (final && ultimo && Math.hypot(x - ultimo.x, y - ultimo.y) < 0.01) return;
+  ultimo = { x: x, y: y };
+  const nx = Math.min(1, Math.max(0, (x - ox) / (HOJA_W * esc)));     // normalizado 0..1 sobre la hoja
+  const ny = Math.min(1, Math.max(0, (y - oy) / (HOJA_H * esc)));
+  actual.puntos.push([r(nx, 5), r(ny, 5), Math.round(performance.now() - t0), r(presion, 2)]);
+}
+function r(v, d) { const k = Math.pow(10, d); return Math.round(v * k) / k; }
+
+/* ───────── Historial ───────── */
+function guardarHistorial() {
+  deshacer.push(trazos.slice());                     // los trazos no se modifican: basta copiar la lista
+  if (deshacer.length > 200) deshacer.shift();
+  rehacer = [];
+}
+function accionDeshacer() {
+  if (!deshacer.length) return;
+  rehacer.push(trazos); trazos = deshacer.pop();
+  cambio();
+}
+function accionRehacer() {
+  if (!rehacer.length) return;
+  deshacer.push(trazos); trazos = rehacer.pop();
+  cambio();
+}
+function accionBorrar() {
+  if (!trazos.length) return;
+  guardarHistorial(); trazos = [];                   // se puede recuperar con Deshacer
+  cambio();
+}
+function cambio() { guardarLocal(); reconstruir(); actualizarBotones(); }
+
+function actualizarBotones() {
+  $('bDeshacer').disabled = !deshacer.length;
+  $('bRehacer').disabled = !rehacer.length;
+  $('bBorrar').disabled = !trazos.length;
+  $('estado').textContent = trazos.length + (trazos.length === 1 ? ' trazo' : ' trazos') + (vista.z > 1.01 ? ' · ' + Math.round(vista.z * 100) + ' %' : '');
+  $('bMover').classList.toggle('activo', modoMover);
+}
+
+/* ───────── Guardado automático en el navegador ───────── */
+function guardarLocal() {
+  try { localStorage.setItem(CLAVE, JSON.stringify(aJSON())); } catch (e) { /* lleno o bloqueado: se ignora */ }
+}
+function cargarLocal() {
+  try {
+    const txt = localStorage.getItem(CLAVE);
+    if (txt) trazos = leerJSON(JSON.parse(txt));
+    const g = +localStorage.getItem(CLAVE + '-grosor');
+    if (g >= 4 && g <= 80) { grosor = g; $('rGrosor').value = g; }
+  } catch (e) { trazos = []; }
+}
+
+/* ───────── Exportar / importar ───────── */
+function aJSON() {
+  return { formato: 'trazos-v1', hoja: { ancho: HOJA_W, alto: HOJA_H }, trazos: trazos };
+}
+
+/** Valida un JSON cargado y devuelve la lista de trazos (o lanza un error). */
+function leerJSON(o) {
+  if (!o || !Array.isArray(o.trazos)) throw new Error('No es un archivo de trazos');
+  return o.trazos.map((t) => {
+    if (!t || !Array.isArray(t.puntos) || !t.puntos.length) throw new Error('Trazo sin puntos');
+    const puntos = t.puntos.map((q) => {
+      if (!Array.isArray(q) || !isFinite(q[0]) || !isFinite(q[1])) throw new Error('Punto no válido');
+      return [+q[0], +q[1], isFinite(q[2]) ? +q[2] : 0, isFinite(q[3]) ? +q[3] : 0.5];
+    });
+    return { grosor: isFinite(t.grosor) ? +t.grosor : 14, puntos: puntos };
+  });
+}
+
+/** Cada trazo → un <path> con línea (sin relleno), en coordenadas de la hoja. */
+function aSVG() {
+  const f1 = (v) => (Math.round(v * 10) / 10).toString();
+  const paths = trazos.map((t) => {
+    const media = t.puntos.reduce((s, q) => s + q[3], 0) / t.puntos.length;
+    const w = f1(t.grosor * factor(media));
+    let d = 'M' + f1(t.puntos[0][0] * HOJA_W) + ',' + f1(t.puntos[0][1] * HOJA_H);
+    if (t.puntos.length === 1) d += 'l0.01,0';       // un punto: path de longitud mínima
+    for (let i = 1; i < t.puntos.length; i++) d += 'L' + f1(t.puntos[i][0] * HOJA_W) + ',' + f1(t.puntos[i][1] * HOJA_H);
+    return '  <path d="' + d + '" fill="none" stroke="#000" stroke-width="' + w + '"/>';
+  });
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + HOJA_W + ' ' + HOJA_H + '" width="100%" height="100%" ' +
+    'style="fill:none;stroke:#000;stroke-linecap:round;stroke-linejoin:round">\n' + paths.join('\n') + '\n</svg>\n';
+}
+
+function nombreArchivo(ext) {
+  const d = new Date(), z = (n) => String(n).padStart(2, '0');
+  return 'trazos-' + d.getFullYear() + z(d.getMonth() + 1) + z(d.getDate()) + '-' + z(d.getHours()) + z(d.getMinutes()) + '.' + ext;
+}
+
+function descargar(texto, tipo, nombre) {
+  const url = URL.createObjectURL(new Blob([texto], { type: tipo }));
+  const a = document.createElement('a');
+  a.href = url; a.download = nombre;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+async function compartir() {
+  if (!trazos.length) return aviso('No hay trazos que compartir');
+  const archivos = [
+    new File([aSVG()], nombreArchivo('svg'), { type: 'image/svg+xml' }),
+    new File([JSON.stringify(aJSON())], nombreArchivo('json'), { type: 'application/json' }),
+  ];
+  if (navigator.canShare && navigator.canShare({ files: archivos })) {
+    try { await navigator.share({ files: archivos, title: 'Trazos' }); }
+    catch (e) { /* cancelado */ }
+  } else {
+    aviso('Este navegador no puede compartir: usa SVG o JSON');
+  }
+}
+
+function abrir(archivo) {
+  if (!archivo) return;
+  archivo.text().then((txt) => {
+    const nuevos = leerJSON(JSON.parse(txt));
+    guardarHistorial(); trazos = nuevos;
+    cambio(); aviso('Cargados ' + nuevos.length + ' trazos');
+  }).catch((e) => aviso('No se pudo abrir: ' + e.message));
+  $('fArchivo').value = '';
+}
+
+/* ───────── Pantalla encendida y pantalla completa ───────── */
+let wakeLock = null, noSleep = null, pantallaActiva = false;
+function mantenerPantallaEncendida() {
+  if (pantallaActiva) return;
+  pantallaActiva = true;
+  // Wake Lock solo existe en HTTPS; desde http://192.168… se usa NoSleep.js (si el servidor lo ofrece)
+  if ('wakeLock' in navigator) {
+    navigator.wakeLock.request('screen').then((w) => { wakeLock = w; }).catch(() => cargarNoSleep());
+  } else {
+    cargarNoSleep();
+  }
+}
+function cargarNoSleep() {
+  const s = document.createElement('script');
+  s.src = 'NoSleep.min.js';
+  s.onload = () => { try { noSleep = new NoSleep(); noSleep.enable(); } catch (e) { /* nada */ } };
+  s.onerror = () => { /* sin servidor: Ajustes > Pantalla y brillo > Bloqueo automático > Nunca */ };
+  document.head.appendChild(s);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && pantallaActiva && 'wakeLock' in navigator && (!wakeLock || wakeLock.released)) {
+    navigator.wakeLock.request('screen').then((w) => { wakeLock = w; }).catch(() => {});
+  }
+});
+
+/* ───────── Botones ───────── */
+let temporizadorAviso = null;
+function aviso(texto) {
+  const a = $('aviso'); a.textContent = texto; a.classList.add('visible');
+  clearTimeout(temporizadorAviso);
+  temporizadorAviso = setTimeout(() => a.classList.remove('visible'), 2200);
+}
+
+$('bDeshacer').onclick = accionDeshacer;
+$('bRehacer').onclick = accionRehacer;
+$('bBorrar').onclick = accionBorrar;
+$('bZoomMas').onclick = () => zoomBoton(1.6);
+$('bZoomMenos').onclick = () => zoomBoton(1 / 1.6);
+$('bEncajar').onclick = encajar;
+$('bMover').onclick = () => { modoMover = !modoMover; actualizarBotones(); aviso(modoMover ? 'Mover: arrastra la hoja con un dedo' : 'Dibujar'); };
+$('bSVG').onclick = () => trazos.length ? descargar(aSVG(), 'image/svg+xml', nombreArchivo('svg')) : aviso('No hay trazos');
+$('bJSON').onclick = () => trazos.length ? descargar(JSON.stringify(aJSON()), 'application/json', nombreArchivo('json')) : aviso('No hay trazos');
+$('bCompartir').onclick = compartir;
+$('fArchivo').onchange = (e) => abrir(e.target.files[0]);
+$('rGrosor').oninput = (e) => {
+  grosor = +e.target.value;
+  try { localStorage.setItem(CLAVE + '-grosor', grosor); } catch (x) { /* nada */ }
+};
+if (document.documentElement.requestFullscreen) {    // en iPhone no existe: allí vale "Añadir a pantalla de inicio"
+  $('bPantalla').hidden = false;
+  $('bPantalla').onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {});
+}
+document.addEventListener('keydown', (e) => {         // atajos con teclado (ratón en el Mac)
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? accionRehacer() : accionDeshacer(); }
+});
+
+/* ───────── Funcionar sin Internet ─────────
+   El service worker (sw.js) guarda la página y p5 en el iPad la primera vez que se abre con conexión.
+   Después, "Añadir a pantalla de inicio" y se abre sin red. Solo funciona con HTTPS (o localhost). */
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => { /* sin HTTPS: se usa como página normal */ });
+}
+</script>
+</body>
+</html>
