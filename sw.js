@@ -1,7 +1,7 @@
 'use strict';
 /* Service worker: deja la app disponible sin conexión.
    Para publicar cambios, sube el número de VERSION: el iPad actualiza la copia la próxima vez que abra con red. */
-const VERSION = 'trazos-v1';
+const VERSION = 'trazos-v2';
 const ARCHIVOS = ['./', './index.html', './p5.min.js', './NoSleep.min.js', './manifest.webmanifest',
                   './icono-180.png', './icono-192.png', './icono-512.png'];
 

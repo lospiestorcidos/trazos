@@ -56,7 +56,7 @@
   <span class="sep"></span>
   <button id="bZoomMenos" title="Alejar">－</button>
   <button id="bZoomMas" title="Acercar">＋</button>
-  <button id="bEncajar" title="Ver la hoja entera">Ver todo</button>
+  <button id="bEncajar" title="Encuadrar todo lo dibujado">Ver todo</button>
   <button id="bMover" title="Mover la hoja con un dedo (no dibuja mientras está activo)">✋ Mover</button>
   <span class="sep"></span>
   <button id="bSVG" title="Descargar SVG">SVG</button>
@@ -74,16 +74,19 @@
    Dibujar trazos — mini aplicación de dibujo para iPad (Apple Pencil), móvil y ratón.
 
    FORMATO DE SALIDA
-   - SVG: cada trazo es un <path> sin relleno, en una hoja de 3508 × 2481 (A4 apaisado).
+   LIENZO INFINITO: se puede dibujar en cualquier sitio y alejar el zoom hasta el 2 %.
+   Las coordenadas son "unidades de hoja" (la vista inicial equivale a una hoja de 3508 × 2481).
+   - SVG: cada trazo es un <path> sin relleno; el viewBox se ajusta a lo dibujado.
      Es justo lo que cargan tus bocetos (comun/svg-puntos.js muestrea cada path), así que
      el archivo se abre directamente en trazo-midi, trazo-cuerpo, etc. con "Cargar otro SVG".
-   - JSON: para seguir dibujando después. Coordenadas normalizadas 0..1 sobre la hoja:
-       { formato:"trazos-v1", hoja:{ancho,alto},
+   - JSON: para seguir dibujando después. Coordenadas en unidades de hoja (formato v2;
+     los archivos v1, con coordenadas 0..1, se siguen leyendo):
+       { formato:"trazos-v2", hoja:{ancho,alto},
          trazos:[ { grosor, puntos:[[x, y, ms, presión], ...] } ] }
    ========================================================================== */
 
 /* ───────── Ajustes ───────── */
-const HOJA_W = 3508, HOJA_H = 2481;     // tamaño de la hoja (unidades del SVG)
+const HOJA_W = 3508, HOJA_H = 2481;     // la vista inicial equivale a esta hoja (unidades del SVG)
 const SUAVIZADO = 0.5;                  // 0 = sin suavizar, 0.9 = muy suavizado (con retraso)
 const DIST_MIN = 1.5;                   // px: no guardar puntos más juntos que esto
 const CLAVE = 'dibujar-trazos-v1';      // localStorage
@@ -96,9 +99,10 @@ let idPuntero = null;     // puntero que dibuja (se ignoran los demás: sin dos 
 let hayLapiz = false;     // si se ha visto un Apple Pencil, el dedo deja de dibujar (palma)
 let grosor = 14;          // en unidades de la hoja
 let esc = 1, ox = 0, oy = 0;            // hoja en pantalla: escala y esquina superior izquierda
-// Vista (zoom y desplazamiento): z = aumento (1 = hoja entera); (cx, cy) = punto de la hoja (0..1) que queda en el centro
-const vista = { z: 1, cx: 0.5, cy: 0.5 };
-const ZOOM_MAX = 24;
+// Vista (zoom y desplazamiento): z = aumento (1 = hoja entera); (cx, cy) = punto del lienzo (unidades de hoja) que queda en el centro
+const vista = { z: 1, cx: HOJA_W / 2, cy: HOJA_H / 2 };
+const ZOOM_MAX = 24, ZOOM_MIN = 0.02;
+const LIMITE = 1e6;       // distancia máxima desde el origen (para no perderse en el infinito)
 let escBase = 1;          // escala con la hoja entera a la vista
 let capaVista = null;     // vista con la que se pintó `capa` (para estirarla mientras haces zoom)
 let modoMover = false;    // botón ✋: un dedo (o el ratón) mueve la hoja en vez de dibujar
@@ -152,25 +156,25 @@ function zonaVista() {
   return { x: windowWidth / 2, y: barra + (windowHeight - barra) / 2 };
 }
 
-/** Fija zoom y centro de la vista (con límites) y recalcula escala y posición de la hoja. */
+/** Fija zoom y centro de la vista (con límites) y recalcula escala y posición del lienzo. */
 function fijarVista(z, cx, cy) {
-  vista.z = Math.min(ZOOM_MAX, Math.max(1, z));
-  vista.cx = Math.min(1, Math.max(0, cx));          // el centro no sale de la hoja: no te pierdes
-  vista.cy = Math.min(1, Math.max(0, cy));
+  vista.z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+  vista.cx = Math.min(LIMITE, Math.max(-LIMITE, cx));
+  vista.cy = Math.min(LIMITE, Math.max(-LIMITE, cy));
   esc = escBase * vista.z;
   const c = zonaVista();
-  ox = c.x - vista.cx * HOJA_W * esc;
-  oy = c.y - vista.cy * HOJA_H * esc;
+  ox = c.x - vista.cx * esc;
+  oy = c.y - vista.cy * esc;
   actualizarBotones();
 }
 
 /** Zoom de factor `f` manteniendo fijo el punto de pantalla (px, py): lo que tocas no se mueve. */
 function zoomEn(f, px, py, mover) {
-  const sx = (px - ox) / (HOJA_W * esc), sy = (py - oy) / (HOJA_H * esc);   // punto de la hoja bajo (px,py)
-  const z = Math.min(ZOOM_MAX, Math.max(1, vista.z * f));
+  const wx = (px - ox) / esc, wy = (py - oy) / esc;                  // punto del lienzo bajo (px,py)
+  const z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, vista.z * f));
   const e2 = escBase * z, c = zonaVista();
   const qx = px + (mover ? mover.x : 0), qy = py + (mover ? mover.y : 0);  // dónde debe quedar ese punto
-  fijarVista(z, (c.x - (qx - sx * HOJA_W * e2)) / (HOJA_W * e2), (c.y - (qy - sy * HOJA_H * e2)) / (HOJA_H * e2));
+  fijarVista(z, wx - (qx - c.x) / e2, wy - (qy - c.y) / e2);
 }
 
 /** Repinta todos los trazos terminados en la capa y refresca la pantalla. */
@@ -179,15 +183,40 @@ function reconstruir() {
   capa = createGraphics(width, height);
   capa.pixelDensity(pixelDensity());
   capa.clear();
-  trazos.forEach((t) => pintarTrazo(capa, t, 1));
+  trazos.forEach((t) => { if (visible(t)) pintarTrazo(capa, t, 1); });   // solo lo que cae en pantalla
   capaVista = { esc: esc, ox: ox, oy: oy };
   redraw();
 }
 
+/** Caja que ocupa un trazo (en unidades del lienzo); se calcula una vez y se guarda. */
+function cajaDe(t) {
+  if (!t.caja) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    t.puntos.forEach((q) => { x0 = Math.min(x0, q[0]); y0 = Math.min(y0, q[1]); x1 = Math.max(x1, q[0]); y1 = Math.max(y1, q[1]); });
+    Object.defineProperty(t, 'caja', { value: [x0, y0, x1, y1], enumerable: false });   // no se guarda en el JSON
+  }
+  return t.caja;
+}
+/** ¿Cae el trazo (al menos en parte) dentro de la pantalla? */
+function visible(t) {
+  const c = cajaDe(t), m = t.grosor * esc * 2;
+  return ox + c[2] * esc + m >= 0 && ox + c[0] * esc - m <= width && oy + c[3] * esc + m >= 0 && oy + c[1] * esc - m <= height;
+}
+
+/** Rejilla muy suave: sirve de referencia al moverte y hacer zoom en el lienzo infinito. */
+function rejilla() {
+  let paso = 500;
+  while (paso * esc < 16) paso *= 5;                  // más espaciada cuanto más lejos estás
+  while (paso * esc > 160) paso /= 5;
+  stroke(238); strokeWeight(1);
+  const x0 = Math.floor(-ox / esc / paso) * paso, y0 = Math.floor(-oy / esc / paso) * paso;
+  for (let x = x0; ox + x * esc <= width; x += paso) line(ox + x * esc, 0, ox + x * esc, height);
+  for (let y = y0; oy + y * esc <= height; y += paso) line(0, oy + y * esc, width, oy + y * esc);
+}
+
 function draw() {
-  background(217);
-  noStroke(); fill(255);
-  rect(ox, oy, HOJA_W * esc, HOJA_H * esc);          // la hoja
+  background(255);                                   // lienzo infinito: blanco por todas partes
+  rejilla();
   // Mientras haces zoom o mueves, la capa ya pintada se estira (rápido); al soltar se repinta nítida
   push();
   translate(ox, oy); scale(esc / capaVista.esc); translate(-capaVista.ox, -capaVista.oy);
@@ -202,13 +231,12 @@ function pintarTrazo(g, t, desde) {
   g.stroke(0); g.noFill(); g.strokeCap(ROUND); g.strokeJoin(ROUND);
   if (p.length === 1) {                              // un toque = un punto
     g.strokeWeight(Math.max(1, t.grosor * esc * factor(p[0][3])));
-    g.point(ox + p[0][0] * HOJA_W * esc, oy + p[0][1] * HOJA_H * esc);
+    g.point(ox + p[0][0] * esc, oy + p[0][1] * esc);
     return;
   }
   for (let i = Math.max(1, desde); i < p.length; i++) {
     g.strokeWeight(Math.max(1, t.grosor * esc * factor((p[i - 1][3] + p[i][3]) / 2)));
-    g.line(ox + p[i - 1][0] * HOJA_W * esc, oy + p[i - 1][1] * HOJA_H * esc,
-           ox + p[i][0] * HOJA_W * esc, oy + p[i][1] * HOJA_H * esc);
+    g.line(ox + p[i - 1][0] * esc, oy + p[i - 1][1] * esc, ox + p[i][0] * esc, oy + p[i][1] * esc);
   }
 }
 
@@ -312,7 +340,17 @@ function zoomBoton(f) {
   zoomEn(f, c.x, c.y);
   reconstruir();
 }
-function encajar() { fijarVista(1, 0.5, 0.5); reconstruir(); }
+/** «Ver todo»: encuadra todo lo dibujado (o la hoja inicial si aún no hay nada). */
+function encajar() {
+  if (!trazos.length) { fijarVista(1, HOJA_W / 2, HOJA_H / 2); reconstruir(); return; }
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  trazos.forEach((t) => { const c = cajaDe(t); x0 = Math.min(x0, c[0]); y0 = Math.min(y0, c[1]); x1 = Math.max(x1, c[2]); y1 = Math.max(y1, c[3]); });
+  const barra = $('barra').offsetHeight;
+  const w = Math.max(x1 - x0, 100), h = Math.max(y1 - y0, 100);
+  const e = Math.min((windowWidth - 24) / w, (windowHeight - barra - 24) / h);
+  fijarVista(e / escBase, (x0 + x1) / 2, (y0 + y1) / 2);
+  reconstruir();
+}
 
 /* Ratón / trackpad del Mac: rueda = desplazar; Ctrl + rueda o pellizco del trackpad = zoom */
 function alRueda(e) {
@@ -334,9 +372,8 @@ function anadir(ev, primero, final) {
   if (ultimo && Math.hypot(x - ultimo.x, y - ultimo.y) < DIST_MIN && !final) return;
   if (final && ultimo && Math.hypot(x - ultimo.x, y - ultimo.y) < 0.01) return;
   ultimo = { x: x, y: y };
-  const nx = Math.min(1, Math.max(0, (x - ox) / (HOJA_W * esc)));     // normalizado 0..1 sobre la hoja
-  const ny = Math.min(1, Math.max(0, (y - oy) / (HOJA_H * esc)));
-  actual.puntos.push([r(nx, 5), r(ny, 5), Math.round(performance.now() - t0), r(presion, 2)]);
+  const nx = (x - ox) / esc, ny = (y - oy) / esc;                      // coordenadas del lienzo
+  actual.puntos.push([r(nx, 1), r(ny, 1), Math.round(performance.now() - t0), r(presion, 2)]);
 }
 function r(v, d) { const k = Math.pow(10, d); return Math.round(v * k) / k; }
 
@@ -367,7 +404,7 @@ function actualizarBotones() {
   $('bDeshacer').disabled = !deshacer.length;
   $('bRehacer').disabled = !rehacer.length;
   $('bBorrar').disabled = !trazos.length;
-  $('estado').textContent = trazos.length + (trazos.length === 1 ? ' trazo' : ' trazos') + (vista.z > 1.01 ? ' · ' + Math.round(vista.z * 100) + ' %' : '');
+  $('estado').textContent = trazos.length + (trazos.length === 1 ? ' trazo' : ' trazos') + (Math.abs(vista.z - 1) > 0.01 ? ' · ' + Math.round(vista.z * 100) + ' %' : '');
   $('bMover').classList.toggle('activo', modoMover);
 }
 
@@ -386,35 +423,44 @@ function cargarLocal() {
 
 /* ───────── Exportar / importar ───────── */
 function aJSON() {
-  return { formato: 'trazos-v1', hoja: { ancho: HOJA_W, alto: HOJA_H }, trazos: trazos };
+  return { formato: 'trazos-v2', hoja: { ancho: HOJA_W, alto: HOJA_H },
+           trazos: trazos.map((t) => ({ grosor: t.grosor, puntos: t.puntos })) };
 }
 
 /** Valida un JSON cargado y devuelve la lista de trazos (o lanza un error). */
 function leerJSON(o) {
   if (!o || !Array.isArray(o.trazos)) throw new Error('No es un archivo de trazos');
+  const v1 = o.formato === 'trazos-v1';              // v1: coordenadas 0..1 sobre la hoja → se pasan a unidades de hoja
+  const kx = v1 ? HOJA_W : 1, ky = v1 ? HOJA_H : 1;
   return o.trazos.map((t) => {
     if (!t || !Array.isArray(t.puntos) || !t.puntos.length) throw new Error('Trazo sin puntos');
     const puntos = t.puntos.map((q) => {
       if (!Array.isArray(q) || !isFinite(q[0]) || !isFinite(q[1])) throw new Error('Punto no válido');
-      return [+q[0], +q[1], isFinite(q[2]) ? +q[2] : 0, isFinite(q[3]) ? +q[3] : 0.5];
+      return [+q[0] * kx, +q[1] * ky, isFinite(q[2]) ? +q[2] : 0, isFinite(q[3]) ? +q[3] : 0.5];
     });
     return { grosor: isFinite(t.grosor) ? +t.grosor : 14, puntos: puntos };
   });
 }
 
-/** Cada trazo → un <path> con línea (sin relleno), en coordenadas de la hoja. */
+/** Cada trazo → un <path> con línea (sin relleno). El viewBox se ajusta a lo dibujado (con un margen). */
 function aSVG() {
   const f1 = (v) => (Math.round(v * 10) / 10).toString();
+  let x0 = 0, y0 = 0, x1 = HOJA_W, y1 = HOJA_H;      // sin trazos: la hoja inicial
+  if (trazos.length) {
+    x0 = y0 = Infinity; x1 = y1 = -Infinity;
+    trazos.forEach((t) => { const c = cajaDe(t), m = t.grosor * 1.7;
+      x0 = Math.min(x0, c[0] - m); y0 = Math.min(y0, c[1] - m); x1 = Math.max(x1, c[2] + m); y1 = Math.max(y1, c[3] + m); });
+  }
   const paths = trazos.map((t) => {
     const media = t.puntos.reduce((s, q) => s + q[3], 0) / t.puntos.length;
     const w = f1(t.grosor * factor(media));
-    let d = 'M' + f1(t.puntos[0][0] * HOJA_W) + ',' + f1(t.puntos[0][1] * HOJA_H);
+    let d = 'M' + f1(t.puntos[0][0]) + ',' + f1(t.puntos[0][1]);
     if (t.puntos.length === 1) d += 'l0.01,0';       // un punto: path de longitud mínima
-    for (let i = 1; i < t.puntos.length; i++) d += 'L' + f1(t.puntos[i][0] * HOJA_W) + ',' + f1(t.puntos[i][1] * HOJA_H);
+    for (let i = 1; i < t.puntos.length; i++) d += 'L' + f1(t.puntos[i][0]) + ',' + f1(t.puntos[i][1]);
     return '  <path d="' + d + '" fill="none" stroke="#000" stroke-width="' + w + '"/>';
   });
   return '<?xml version="1.0" encoding="UTF-8"?>\n' +
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + HOJA_W + ' ' + HOJA_H + '" width="100%" height="100%" ' +
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + f1(x0) + ' ' + f1(y0) + ' ' + f1(x1 - x0) + ' ' + f1(y1 - y0) + '" width="100%" height="100%" ' +
     'style="fill:none;stroke:#000;stroke-linecap:round;stroke-linejoin:round">\n' + paths.join('\n') + '\n</svg>\n';
 }
 
