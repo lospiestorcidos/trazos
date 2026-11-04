@@ -1,7 +1,7 @@
 'use strict';
 /* Service worker: deja la app disponible sin conexión.
    Para publicar cambios, sube el número de VERSION: el iPad actualiza la copia la próxima vez que abra con red. */
-const VERSION = 'trazos-v3';
+const VERSION = 'trazos-v4';
 const ARCHIVOS = ['./', './index.html', './p5.min.js', './NoSleep.min.js', './manifest.webmanifest',
                   './icono-180.png', './icono-192.png', './icono-512.png'];
 
@@ -15,8 +15,18 @@ self.addEventListener('activate', (e) => {
     .then(() => self.clients.claim()));
 });
 
-// Primero la copia guardada (rápido y sin red); si no está, red.
+// La página y sw.js: primero la red (así siempre ves lo último); sin red, la copia guardada.
+// El resto (p5, iconos…): primero la copia guardada.
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
+  const pagina = e.request.mode === 'navigate' || /\/(index\.html)?$/.test(new URL(e.request.url).pathname);
+  if (pagina) {
+    e.respondWith(fetch(e.request, { cache: 'no-store' }).then((r) => {
+      const copia = r.clone();
+      caches.open(VERSION).then((c) => c.put(e.request, copia));
+      return r;
+    }).catch(() => caches.match(e.request, { ignoreSearch: true })));
+    return;
+  }
   e.respondWith(caches.match(e.request, { ignoreSearch: true }).then((r) => r || fetch(e.request)));
 });

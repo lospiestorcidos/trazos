@@ -648,7 +648,10 @@ document.addEventListener('keydown', (e) => {         // atajos con teclado (rat
    El service worker (sw.js) guarda la página y p5 en el iPad la primera vez que se abre con conexión.
    Después, "Añadir a pantalla de inicio" y se abre sin red. Solo funciona con HTTPS (o localhost). */
 if ('serviceWorker' in navigator) {
+  const habiaSW = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.register('sw.js').catch(() => { /* sin HTTPS: se usa como página normal */ });
+  // Si una versión nueva toma el control, recarga para enseñarla enseguida
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (habiaSW && !actual) location.reload(); });
 }
 </script>
 </body>
