@@ -38,6 +38,10 @@
   #barra .sep { flex: none; width: 1px; height: 32px; background: #ccc; }
   #barra .grosor { flex: none; display: flex; align-items: center; gap: 8px; font-size: 14px; }
   #barra input[type=range] { width: 130px; height: 48px; }
+  #barra .colores { flex: none; display: flex; align-items: center; gap: 6px; }
+  #barra .color { flex: none; width: 36px; height: 36px; min-width: 36px; padding: 0; border-radius: 50%; border: 2px solid #999; }
+  #barra .color.activo { border: 3px solid var(--acento); box-shadow: 0 0 0 2px #fff inset; }
+  #barra input[type=color] { flex: none; width: 48px; height: 48px; padding: 2px; border: 1px solid #999; border-radius: 10px; background: #f4f4f4; }
   #estado { flex: none; font-size: 13px; color: #666; min-width: 70px; }
   #aviso { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 6;
     background: rgba(0,0,0,.8); color: #fff; padding: 10px 16px; border-radius: 10px; font-size: 15px;
@@ -53,6 +57,19 @@
   <button id="bBorrar" title="Borrar todo (se puede deshacer)">Borrar todo</button>
   <span class="sep"></span>
   <span class="grosor">Grosor <input id="rGrosor" type="range" min="4" max="80" value="14"></span>
+  <span class="sep"></span>
+  <span class="colores" id="colores">
+    <button class="color" data-c="#000000" style="background:#000" title="Negro"></button>
+    <button class="color" data-c="#e53935" style="background:#e53935" title="Rojo"></button>
+    <button class="color" data-c="#1e66f5" style="background:#1e66f5" title="Azul"></button>
+    <button class="color" data-c="#2e9e4f" style="background:#2e9e4f" title="Verde"></button>
+    <button class="color" data-c="#f5b400" style="background:#f5b400" title="Amarillo"></button>
+    <button class="color" data-c="#ffffff" style="background:#fff" title="Blanco"></button>
+    <input id="cColor" type="color" value="#000000" title="Elegir otro color">
+  </span>
+  <span class="sep"></span>
+  <label class="boton" title="Poner una imagen de fondo para pintar encima">Imagen<input id="fImagen" type="file" accept="image/*" hidden></label>
+  <button id="bFondo" title="Mostrar / ocultar la imagen de fondo" disabled>Fondo</button>
   <span class="sep"></span>
   <button id="bZoomMenos" title="Alejar">－</button>
   <button id="bZoomMas" title="Acercar">＋</button>
@@ -98,6 +115,10 @@ let actual = null;        // trazo que se está dibujando
 let idPuntero = null;     // puntero que dibuja (se ignoran los demás: sin dos dedos ni palma)
 let hayLapiz = false;     // si se ha visto un Apple Pencil, el dedo deja de dibujar (palma)
 let grosor = 14;          // en unidades de la hoja
+let color = '#000000';    // color de los trazos nuevos
+let fondo = null;         // imagen de fondo: { img, url } (se pinta debajo de los trazos, no se exporta)
+let fondoVisible = true;
+const CLAVE_FONDO = 'dibujar-trazos-v1-fondo';
 let esc = 1, ox = 0, oy = 0;            // hoja en pantalla: escala y esquina superior izquierda
 // Vista (zoom y desplazamiento): z = aumento (1 = hoja entera); (cx, cy) = punto del lienzo (unidades de hoja) que queda en el centro
 const vista = { z: 1, cx: HOJA_W / 2, cy: HOJA_H / 2 };
@@ -130,6 +151,8 @@ function setup() {
   document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
 
   cargarLocal();
+  actualizarColores();
+  try { const f = localStorage.getItem(CLAVE_FONDO); if (f) ponerFondo(f).catch(() => {}); } catch (x) { /* nada */ }
   colocarHoja();
   reconstruir();
   actualizarBotones();
@@ -217,6 +240,11 @@ function rejilla() {
 function draw() {
   background(255);                                   // lienzo infinito: blanco por todas partes
   rejilla();
+  if (fondo && fondoVisible) {                       // imagen de fondo: centrada en la hoja, ajustada sin deformar
+    const k = Math.min(HOJA_W / fondo.img.width, HOJA_H / fondo.img.height);
+    const w = fondo.img.width * k * esc, h = fondo.img.height * k * esc;
+    drawingContext.drawImage(fondo.img, ox + (HOJA_W / 2) * esc - w / 2, oy + (HOJA_H / 2) * esc - h / 2, w, h);
+  }
   // Mientras haces zoom o mueves, la capa ya pintada se estira (rápido); al soltar se repinta nítida
   push();
   translate(ox, oy); scale(esc / capaVista.esc); translate(-capaVista.ox, -capaVista.oy);
@@ -228,7 +256,7 @@ function draw() {
 /** Dibuja un trazo en `g` (el lienzo o la capa). Con presión, el grosor varía tramo a tramo. */
 function pintarTrazo(g, t, desde) {
   const p = t.puntos;
-  g.stroke(0); g.noFill(); g.strokeCap(ROUND); g.strokeJoin(ROUND);
+  g.stroke(t.color || '#000000'); g.noFill(); g.strokeCap(ROUND); g.strokeJoin(ROUND);
   if (p.length === 1) {                              // un toque = un punto
     g.strokeWeight(Math.max(1, t.grosor * esc * factor(p[0][3])));
     g.point(ox + p[0][0] * esc, oy + p[0][1] * esc);
@@ -246,7 +274,7 @@ function factor(pr) { return 0.35 + 1.3 * pr; }
 /* ───────── Dibujo con puntero (dedo, Pencil, ratón) ───────── */
 /* Reglas:
    - Pencil o ratón: dibuja.  Un dedo: dibuja (salvo que se haya usado el Pencil: entonces es la palma).
-   - Dos dedos: zoom (pellizco) y mover la hoja. Si había un trazo empezado con el primer dedo, se descarta.
+   - Dos dedos: mover la hoja (el pellizco no hace zoom). Si había un trazo empezado con el primer dedo, se descarta.
    - Botón ✋ Mover: un dedo o el ratón mueven la hoja y no dibujan. */
 function alBajar(e) {
   if (e.pointerType === 'pen') hayLapiz = true;
@@ -268,7 +296,7 @@ function alBajar(e) {
   idPuntero = e.pointerId;
   $('barra').classList.add('dibujando');
   t0 = performance.now();
-  actual = { grosor: grosor, puntos: [] };
+  actual = { grosor: grosor, color: color, puntos: [] };
   ultimo = null;
   anadir(e, true);
   redraw();
@@ -328,8 +356,8 @@ function medidas() {
 function iniciarGesto() { gesto = medidas(); }
 function hacerGesto() {
   const m = medidas();
-  const f = (gesto.d > 10 && m.d > 10) ? m.d / gesto.d : 1;          // pellizco → zoom
-  zoomEn(f, gesto.cx, gesto.cy, { x: m.cx - gesto.cx, y: m.cy - gesto.cy });   // y arrastre → desplazar
+  // El pellizco NO hace zoom (se usan los botones ＋ －); dos dedos solo desplazan la hoja
+  zoomEn(1, gesto.cx, gesto.cy, { x: m.cx - gesto.cx, y: m.cy - gesto.cy });
   gesto = m;
   redraw();
 }
@@ -352,11 +380,11 @@ function encajar() {
   reconstruir();
 }
 
-/* Ratón / trackpad del Mac: rueda = desplazar; Ctrl + rueda o pellizco del trackpad = zoom */
+/* Ratón / trackpad del Mac: rueda = desplazar (el pellizco del trackpad no hace zoom) */
 function alRueda(e) {
   e.preventDefault();
-  if (e.ctrlKey || e.metaKey) zoomEn(Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
-  else zoomEn(1, e.clientX, e.clientY, { x: -e.deltaX, y: -e.deltaY });
+  if (e.ctrlKey || e.metaKey) return;                // pellizco del trackpad: ignorado
+  zoomEn(1, e.clientX, e.clientY, { x: -e.deltaX, y: -e.deltaY });
   clearTimeout(alRueda.t); alRueda.t = setTimeout(reconstruir, 120);
   redraw();
 }
@@ -406,6 +434,8 @@ function actualizarBotones() {
   $('bBorrar').disabled = !trazos.length;
   $('estado').textContent = trazos.length + (trazos.length === 1 ? ' trazo' : ' trazos') + (Math.abs(vista.z - 1) > 0.01 ? ' · ' + Math.round(vista.z * 100) + ' %' : '');
   $('bMover').classList.toggle('activo', modoMover);
+  $('bFondo').disabled = !fondo;
+  $('bFondo').classList.toggle('activo', !!fondo && fondoVisible);
 }
 
 /* ───────── Guardado automático en el navegador ───────── */
@@ -418,13 +448,16 @@ function cargarLocal() {
     if (txt) trazos = leerJSON(JSON.parse(txt));
     const g = +localStorage.getItem(CLAVE + '-grosor');
     if (g >= 4 && g <= 80) { grosor = g; $('rGrosor').value = g; }
+    const c = localStorage.getItem(CLAVE + '-color');
+    if (/^#[0-9a-f]{6}$/i.test(c)) color = c;
+    fondoVisible = localStorage.getItem(CLAVE + '-fondo-visible') !== '0';
   } catch (e) { trazos = []; }
 }
 
 /* ───────── Exportar / importar ───────── */
 function aJSON() {
   return { formato: 'trazos-v2', hoja: { ancho: HOJA_W, alto: HOJA_H },
-           trazos: trazos.map((t) => ({ grosor: t.grosor, puntos: t.puntos })) };
+           trazos: trazos.map((t) => ({ grosor: t.grosor, color: t.color || '#000000', puntos: t.puntos })) };
 }
 
 /** Valida un JSON cargado y devuelve la lista de trazos (o lanza un error). */
@@ -438,7 +471,7 @@ function leerJSON(o) {
       if (!Array.isArray(q) || !isFinite(q[0]) || !isFinite(q[1])) throw new Error('Punto no válido');
       return [+q[0] * kx, +q[1] * ky, isFinite(q[2]) ? +q[2] : 0, isFinite(q[3]) ? +q[3] : 0.5];
     });
-    return { grosor: isFinite(t.grosor) ? +t.grosor : 14, puntos: puntos };
+    return { grosor: isFinite(t.grosor) ? +t.grosor : 14, color: /^#[0-9a-f]{6}$/i.test(t.color) ? t.color : '#000000', puntos: puntos };
   });
 }
 
@@ -457,7 +490,7 @@ function aSVG() {
     let d = 'M' + f1(t.puntos[0][0]) + ',' + f1(t.puntos[0][1]);
     if (t.puntos.length === 1) d += 'l0.01,0';       // un punto: path de longitud mínima
     for (let i = 1; i < t.puntos.length; i++) d += 'L' + f1(t.puntos[i][0]) + ',' + f1(t.puntos[i][1]);
-    return '  <path d="' + d + '" fill="none" stroke="#000" stroke-width="' + w + '"/>';
+    return '  <path d="' + d + '" fill="none" stroke="' + (t.color || '#000000') + '" stroke-width="' + w + '"/>';
   });
   return '<?xml version="1.0" encoding="UTF-8"?>\n' +
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + f1(x0) + ' ' + f1(y0) + ' ' + f1(x1 - x0) + ' ' + f1(y1 - y0) + '" width="100%" height="100%" ' +
@@ -501,6 +534,56 @@ function abrir(archivo) {
   $('fArchivo').value = '';
 }
 
+/* ───────── Color de los trazos ───────── */
+function elegirColor(c) {
+  color = c.toLowerCase();
+  try { localStorage.setItem(CLAVE + '-color', color); } catch (x) { /* nada */ }
+  actualizarColores();
+}
+function actualizarColores() {
+  document.querySelectorAll('#colores .color').forEach((b) => b.classList.toggle('activo', b.dataset.c === color));
+  $('cColor').value = color;
+}
+
+/* ───────── Imagen de fondo ───────── */
+/** Carga una imagen desde una URL (dataURL u objectURL) y la deja como fondo. */
+function ponerFondo(url) {
+  return new Promise((ok, mal) => {
+    const img = new Image();
+    img.onload = () => { fondo = { img: img }; actualizarBotones(); redraw(); ok(); };
+    img.onerror = () => mal(new Error('imagen no válida'));
+    img.src = url;
+  });
+}
+/** Reduce la imagen (máx. 2400 px) y la guarda en el navegador para que siga ahí al reabrir. */
+function cargarImagenFondo(archivo) {
+  if (!archivo) return;
+  const url = URL.createObjectURL(archivo);
+  const img = new Image();
+  img.onload = () => {
+    const k = Math.min(1, 2400 / Math.max(img.width, img.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(url);
+    const dataUrl = c.toDataURL('image/jpeg', 0.85);
+    fondoVisible = true;
+    try { localStorage.setItem(CLAVE_FONDO, dataUrl); localStorage.setItem(CLAVE + '-fondo-visible', '1'); }
+    catch (x) { aviso('Imagen puesta, pero no cabe para guardarla al cerrar'); }
+    ponerFondo(dataUrl);
+  };
+  img.onerror = () => { URL.revokeObjectURL(url); aviso('No se pudo abrir la imagen'); };
+  img.src = url;
+  $('fImagen').value = '';
+}
+function alternarFondo() {
+  if (!fondo) return;
+  fondoVisible = !fondoVisible;
+  try { localStorage.setItem(CLAVE + '-fondo-visible', fondoVisible ? '1' : '0'); } catch (x) { /* nada */ }
+  actualizarBotones(); redraw();
+  aviso(fondoVisible ? 'Fondo activado' : 'Fondo desactivado');
+}
+
 /* ───────── Pantalla encendida y pantalla completa ───────── */
 let wakeLock = null, noSleep = null, pantallaActiva = false;
 function mantenerPantallaEncendida() {
@@ -541,6 +624,10 @@ $('bZoomMas').onclick = () => zoomBoton(1.6);
 $('bZoomMenos').onclick = () => zoomBoton(1 / 1.6);
 $('bEncajar').onclick = encajar;
 $('bMover').onclick = () => { modoMover = !modoMover; actualizarBotones(); aviso(modoMover ? 'Mover: arrastra la hoja con un dedo' : 'Dibujar'); };
+$('fImagen').onchange = (e) => cargarImagenFondo(e.target.files[0]);
+$('bFondo').onclick = alternarFondo;
+document.querySelectorAll('#colores .color').forEach((b) => { b.onclick = () => elegirColor(b.dataset.c); });
+$('cColor').oninput = (e) => elegirColor(e.target.value);
 $('bSVG').onclick = () => trazos.length ? descargar(aSVG(), 'image/svg+xml', nombreArchivo('svg')) : aviso('No hay trazos');
 $('bJSON').onclick = () => trazos.length ? descargar(JSON.stringify(aJSON()), 'application/json', nombreArchivo('json')) : aviso('No hay trazos');
 $('bCompartir').onclick = compartir;
